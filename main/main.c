@@ -1221,12 +1221,12 @@ void app_main(void) {
 //	ESP_LOGI(AMR_STATE_TAG, "Create amr state task");
 //	xTaskCreate(amr_state_machine, "amr_state_machine", 4096, NULL, 7, NULL);
 
-	ESP_LOGI(FUNCTIONAL_TAG, "Create check functional input task");
-	xTaskCreate(check_functional_inputs, "check_functional_inputs", 4096, NULL, 5, NULL);
+//	ESP_LOGI(FUNCTIONAL_TAG, "Create check functional input task");
+//	xTaskCreate(check_functional_inputs, "check_functional_inputs", 4096, NULL, 5, NULL);
 	
 	vTaskDelay(pdMS_TO_TICKS(2000)); // this delay is neccessary to let Master start sending PulseA/B before check estop routine
-	ESP_LOGI(ESTOP_PCNT_TAG, "Create check estop task");
-	xTaskCreate(check_estop, "check_estop", 4096, NULL, 9, NULL);
+//	ESP_LOGI(ESTOP_PCNT_TAG, "Create check estop task");
+//	xTaskCreate(check_estop, "check_estop", 4096, NULL, 9, NULL);
 
 //	ESP_LOGI(NC_TWAI_TAG, "Create nc twai task");
 //	xTaskCreate(nc_twai_task, "nc_uart_task", 4096, NULL, 1, NULL);
