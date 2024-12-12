@@ -58,13 +58,8 @@
 #define BOOTKEY (GPIO_NUM_47)
 #define BMS GPIO_NUM_48
 
-#define DMX_UART_NUM (UART_NUM_2) // dmx uart
-#define BUF_SIZE 512
-#define LOW_BAT_THRESHOLD 20
-
 static const char *BOOTKEY_TAG = "bootkey_gpio";
-//static const char *FUNCTIONAL_TAG = "functional_gpio";
-//static const char *ESTOP_PCNT_TAG = "estop_pcnt";
+static const char *ESTOP_PCNT_TAG = "estop_pcnt";
 static const char *SLAVE_SPI_DI_TAG = "slave_spi_di";
 static const char *SLAVE_DO_TAG = "slave_do";
 static const char *I2C_SLAVE_TAG = "i2c_slave";
@@ -76,13 +71,6 @@ static const char *AMR_STATE_TAG = "amr_state";
 /* -------------------- global -------------------- -------------------- -------------------- -------------------- -------------------- --------------------
 */
 
-/* shoalbot_amr_state I will decide the state based on priority, then tell DMX
-0: SHTDWN 1: ESTOP 2: ERROR 3: LOWBAT 4: CHRGNG 5: IDLE 6: SHWBAT
-11: BLOCK 12: LEFT 13: RIGHT 14: MOVE 15: FAIL 16: AUTOCHRGNG
-*/
-int8_t shoalbot_amr_state = 5;
-int8_t prev_amr_state;
-
 bool slave_gpio_di[8] = {};
 uint8_t slave_spi_di0, slave_spi_di1;
 uint8_t slave_to_master_buffer[6] = {
@@ -91,83 +79,27 @@ uint8_t slave_to_master_buffer[6] = {
 	0b00000000, // at slave: DI_7, DI_6, DI_5, DI_4, DI_3, DI_2, DI_1, DI_0
 	0b00000000, // at slave: DO_9. DO_8. DO_5. DO_4. DO_3, DO_2, DO_1, DO_0
 	0b00000000, // at slave: x, x, x, x, x, x, x, BOOTKEY
-	0b00000000, // esp_reset_reason (SLAVE)
+	0b00000000, // interval count
 };
 uint8_t slave_do = 0; // MSB to LSB: DO_9, DO_8, DO_5 to DO_0
 uint8_t slave_pass1_pass2_bms; //MSB to LSB: x, x, x, x, x, PASS_2, PASS_1, BMS
-//uint8_t navigation_intent_index;
 uint8_t battery_level = 0;
 bool new_i2c_incoming;
 bool new_slave_gpio_do = false;
 
-bool isBootkeylongpressed;
-bool isEstopengaged;
-bool isManualchargeengaged;
-bool isResetpressed;
-bool isBumperengaged;
-bool isBatterylow;
-bool isBlock;
-bool isLeft;
-bool isRight;
-bool isMove;
-bool isFail;
-bool isAutochargengaged;
-uint16_t showbat_counter;
-uint8_t indexBattery;
-bool isShowbat;
 int pulse_count = 0, prev_pulse_count;
 const int dmx_uart_buffer_size = 127;
 const uint8_t dmx_uart_read_tout = 3; // 3.5T * 8 = 28 ticks, TOUT=3 -> ~24..33 ticks
-esp_reset_reason_t slave_reason;
-// uint8_t crash_i; // malicious counter
 
 
 /* ---------------FUNCTION PROTOTYPES---------------- */
-void amr_state_machine(void* arg);
-void check_bootkey(void* arg);
-void check_functional_inputs(void* arg);
 void check_estop(void* arg);
 uint8_t read_spi_1();
 uint8_t read_spi_2();
 void slave_gpio_spi_di_task(void* arg);
 esp_err_t i2c_read();
 void i2c_task(void *arg);
-void createBuffer(bool TmpBufferCreate);
-void dmx_write(uint16_t channel, uint8_t value);
-void dmx_write_all(uint8_t * data, uint16_t start, size_t size);
-void dmx_uart_task(void* arg);
-void set_led(const uint8_t color_cmd);
 void slave_gpio_do_task(void* arg);
-
-
-/* -------------------- bootkey -------------------- -------------------- -------------------- -------------------- -------------------- --------------------
-*/
-void check_bootkey(void* arg) { 
-	bool bootkey_pressed = false;
-	uint32_t bootkey_start = 0; // start timer when bootkey is pressed
-	while(1) {
-		if (gpio_get_level(BOOTKEY)) {
-			//ESP_LOGI(BOOTKEY_TAG, "BOOTKEY is pressed");
-			if (!bootkey_pressed) {
-				bootkey_pressed = true;
-				bootkey_start = esp_log_timestamp();
-			}
-			else if (bootkey_pressed) {
-				uint32_t elapsed_time = esp_log_timestamp() - bootkey_start;
-				if (elapsed_time > 500 ) { // 0.5 seconds
-					//ESP_LOGI(BOOTKEY_TAG, "BOOTKEY pressed for 5 seconds");
-					isBootkeylongpressed = true;
-				}
-				else isBootkeylongpressed = false;
-			}
-		}
-		else {
-			bootkey_pressed = false;
-		}
-		vTaskDelay(pdMS_TO_TICKS(50));
-	}
-	vTaskDelete(NULL);
-}
 
 
 /* -------------------- estop -------------------- -------------------- -------------------- -------------------- -------------------- --------------------
@@ -193,15 +125,7 @@ pcnt_channel_handle_t pcnt_chan_b = NULL;
 void check_estop(void* arg) {
 	while(1) {
 		ESP_ERROR_CHECK(pcnt_unit_get_count(pcnt_unit, &pulse_count));
-        // ESP_LOGI(ESTOP_PCNT_TAG, "Pulse count: %d", pulse_count);
-		if ((pulse_count - prev_pulse_count) < 2) { // no new estop pulse is detected for the cycle
-		// if ((pulse_count - prev_pulse_count) == 0) { // no new estop pulse is detected for the cycle
-			// ESP_LOGI(ESTOP_PCNT_TAG, "ESTOP !");
-			isEstopengaged = true;
-		}
-		else {
-			isEstopengaged = false;
-		}
+		slave_to_master_buffer[5] = pulse_count - prev_pulse_count;
 		prev_pulse_count = pulse_count;
 		if (pulse_count>95) { // a high enough odd number
 			ESP_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit));
@@ -322,9 +246,6 @@ void slave_gpio_spi_di_task(void* arg) {
 		slave_gpio_di[7] = gpio_get_level(DI_18);
 		slave_spi_di0 = read_spi_1(); // ESP_LOGI(SLAVE_SPI_DI_TAG, "SPI0: 0x%02X", slave_spi_di0);
 		slave_spi_di1 = read_spi_2(); // ESP_LOGI(SLAVE_SPI_DI_TAG, "SPI1: 0x%02X", slave_spi_di1);
-		// slave_to_master_buffer[2] -> at slave: DI_7, DI_6, DI_5, DI_4, DI_3, DI_2, DI_1, DI_0
-		// slave_to_master_buffer[1] -> at slave: DI_15, DI_14, DI_13, DI_12, DI_11, DI_10, DI_09, DI_08
-		// slave_to_master_buffer[0] -> at slave: DI_23, DI_22, DI_21, DI_20, DI_19, DI_18, DI_17, DI_16
 		slave_to_master_buffer[2] = 0x00 | slave_gpio_di[0] | (slave_gpio_di[1] << 1);
 		slave_to_master_buffer[2] |= (slave_spi_di0 << 2);
 		slave_to_master_buffer[1] = 0x00 | (slave_gpio_di[2] << 4) | (slave_gpio_di[3] << 5) | (slave_gpio_di[4] << 6) | (slave_gpio_di[5] << 7);
@@ -389,9 +310,6 @@ esp_err_t i2c_read() {
         return err;
     }
     if (xQueueReceive(receive_queue, &rx_data, pdMS_TO_TICKS(100)) == pdPASS) {
-		// for (int i = 0; i < 5; i++) {
-        //     ESP_LOGI(I2C_SLAVE_TAG, "Byte %d: 0x%02X", i, master_to_slave_buffer[i]);
-        // }
 		if(*(master_to_slave_buffer) == 0xBB) {
 			slave_do = *(master_to_slave_buffer + 1);
 			slave_pass1_pass2_bms = *(master_to_slave_buffer + 2);
@@ -405,11 +323,6 @@ esp_err_t i2c_read() {
 			}
 		}
     } 
-	// ESP_LOGI(SLAVE_SPI_DI_TAG, "State 0: 0x%02X\n", slave_to_master_buffer[0]);
-	// ESP_LOGI(SLAVE_SPI_DI_TAG, "State 1: 0x%02X\n", slave_to_master_buffer[1]);
-	// ESP_LOGI(SLAVE_SPI_DI_TAG, "State 2: 0x%02X\n", slave_to_master_buffer[2]);
-	// ESP_LOGI(SLAVE_SPI_DI_TAG, "State 3: 0x%02X\n", slave_to_master_buffer[3]);
-	// ESP_LOGI(SLAVE_SPI_DI_TAG, "State 4: 0x%02X\n", slave_to_master_buffer[4]);
 	free(master_to_slave_buffer); // free allocated memory
     vQueueDelete(receive_queue); // delete the queue to free resources
     return ESP_OK;
@@ -419,43 +332,6 @@ void i2c_task(void *arg) {
 	while(1) {
 		i2c_read();
 		if(new_i2c_incoming) {
-			// ESP_LOGI(I2C_SLAVE_TAG, "Slave do: 0x%04X\n", slave_do);
-			// ESP_LOGI(I2C_SLAVE_TAG, "Navigation intent index: %d", navigation_intent_index);
-			// ESP_LOGI(I2C_SLAVE_TAG, "Battery level: %d", battery_level);
-//			if (battery_level < LOW_BAT_THRESHOLD) isBatterylow = true;
-//			else isBatterylow = false;
-//			if (battery_level >= 80) indexBattery = 3;
-//			else if (battery_level >= 50 && battery_level < 80) indexBattery = 2;
-//			else if (battery_level < 50) indexBattery = 1;
-//			else indexBattery = 0;
-//			isBlock = false; isLeft = false; isRight = false; isMove = false; isFail = false; isAutochargengaged = false;
-			// switch (navigation_intent_index) {
-			// 	case 11:
-			// 		isBlock = true; 
-			// 		break;
-			// 	case 12:
-			// 		isLeft = true; 
-			// 		break;
-			// 	case 13:
-			// 		isRight = true; 
-			// 		break;
-			// 	case 14:
-			// 		isMove = true; 
-			// 		break;
-			// 	case 15:
-			// 		isFail = true;
-			// 		break;
-			// 	case 16:
-			// 		isAutochargengaged = true;
-			// 		break;
-			// 	default:
-			// 		isBlock = false;
-			// 		isLeft = false;
-			// 		isRight = false;
-			// 		isMove = false;
-			// 		isFail = false; 
-			// 		isAutochargengaged = false;
-			// }
 			new_slave_gpio_do = true;
 			new_i2c_incoming = false;
 		}
@@ -543,9 +419,6 @@ void nc_twai_task(void* arg) { // echo back received twai message, with identifi
 */
 
 void app_main(void) {
-//	slave_reason = esp_reset_reason();
-//	slave_to_master_buffer[5] = (uint8_t) slave_reason;
-	
 	ESP_ERROR_CHECK(gpio_reset_pin(BMS));
 	ESP_ERROR_CHECK(gpio_reset_pin(PASS_1));
 	ESP_ERROR_CHECK(gpio_reset_pin(PASS_2));
@@ -575,8 +448,6 @@ void app_main(void) {
 	ESP_ERROR_CHECK(gpio_set_direction(PASS_1, GPIO_MODE_OUTPUT));
 	ESP_ERROR_CHECK(gpio_set_direction(PASS_2, GPIO_MODE_OUTPUT));
 	ESP_LOGI(SLAVE_SPI_DI_TAG, "Configure gpio direction");
-	// ESP_ERROR_CHECK(gpio_set_direction(DI_0, GPIO_MODE_INPUT));
-	// ESP_ERROR_CHECK(gpio_set_direction(DI_1, GPIO_MODE_INPUT));
 	ESP_ERROR_CHECK(gpio_set_direction(DI_12, GPIO_MODE_INPUT));
 	ESP_ERROR_CHECK(gpio_set_direction(DI_13, GPIO_MODE_INPUT));
 	ESP_ERROR_CHECK(gpio_set_direction(DI_14, GPIO_MODE_INPUT));
@@ -591,36 +462,27 @@ void app_main(void) {
 	ESP_ERROR_CHECK(gpio_set_pull_mode(I2C_SCL, GPIO_PULLUP_ONLY));
 	vTaskDelay(pdMS_TO_TICKS(50));
 
-//	gpio_set_level(BMS, 1);
-
-//    nc_twai_init();
-//	xTaskCreatePinnedToCore(transmit_TWAI, "transmit_TWAI", 2048, NULL, 1, NULL, 0);
-//	xTaskCreatePinnedToCore(receive_TWAI, "receive_TWAI", 2048, NULL, 1, NULL, 0);
-
 	ESP_LOGI(NC_TWAI_TAG, "Install twai driver");
 	ESP_ERROR_CHECK(twai_driver_install(&g_config, &t_config, &f_config));
 	ESP_LOGI(NC_TWAI_TAG, "Start twai driver");
 	ESP_ERROR_CHECK(twai_start());
 
-//	ESP_LOGI(BOOTKEY_TAG, "Create bootkey task");
-//	xTaskCreate(check_bootkey, "check_bootkey", 4096, NULL, 5, NULL);
-
-//	ESP_LOGI(ESTOP_PCNT_TAG, "Install pcnt unit");
-//	ESP_ERROR_CHECK(pcnt_new_unit(&unit_config, &pcnt_unit));
-//	ESP_LOGI(ESTOP_PCNT_TAG, "Set glitch filter");
-//	ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &filter_config));
-//	ESP_LOGI(ESTOP_PCNT_TAG, "Install pcnt channels");
-//	ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &chan_a_config, &pcnt_chan_a));
-//	ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &chan_b_config, &pcnt_chan_b));
-//	ESP_LOGI(ESTOP_PCNT_TAG, "Set edge and level actions for pcnt channels");
-//	ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_a, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
-//	ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_b, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
-//	ESP_LOGI(ESTOP_PCNT_TAG, "Enable pcnt unit");
-//	ESP_ERROR_CHECK(pcnt_unit_enable(pcnt_unit));
-//	ESP_LOGI(ESTOP_PCNT_TAG, "Clear pcnt unit");
-//	ESP_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit));
-//	ESP_LOGI(ESTOP_PCNT_TAG, "Start pcnt unit");
-//	ESP_ERROR_CHECK(pcnt_unit_start(pcnt_unit));
+	ESP_LOGI(ESTOP_PCNT_TAG, "Install pcnt unit");
+	ESP_ERROR_CHECK(pcnt_new_unit(&unit_config, &pcnt_unit));
+	ESP_LOGI(ESTOP_PCNT_TAG, "Set glitch filter");
+	ESP_ERROR_CHECK(pcnt_unit_set_glitch_filter(pcnt_unit, &filter_config));
+	ESP_LOGI(ESTOP_PCNT_TAG, "Install pcnt channels");
+	ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &chan_a_config, &pcnt_chan_a));
+	ESP_ERROR_CHECK(pcnt_new_channel(pcnt_unit, &chan_b_config, &pcnt_chan_b));
+	ESP_LOGI(ESTOP_PCNT_TAG, "Set edge and level actions for pcnt channels");
+	ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_a, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
+	ESP_ERROR_CHECK(pcnt_channel_set_edge_action(pcnt_chan_b, PCNT_CHANNEL_EDGE_ACTION_INCREASE, PCNT_CHANNEL_EDGE_ACTION_INCREASE));
+	ESP_LOGI(ESTOP_PCNT_TAG, "Enable pcnt unit");
+	ESP_ERROR_CHECK(pcnt_unit_enable(pcnt_unit));
+	ESP_LOGI(ESTOP_PCNT_TAG, "Clear pcnt unit");
+	ESP_ERROR_CHECK(pcnt_unit_clear_count(pcnt_unit));
+	ESP_LOGI(ESTOP_PCNT_TAG, "Start pcnt unit");
+	ESP_ERROR_CHECK(pcnt_unit_start(pcnt_unit));
 	
 	ESP_LOGI(SLAVE_SPI_DI_TAG, "Initialize spi bus");
 	ESP_ERROR_CHECK(spi_bus_initialize(SPI3_HOST, &bus_config, SPI_DMA_CH_AUTO));
@@ -649,19 +511,11 @@ void app_main(void) {
 	ESP_ERROR_CHECK(uart_flush(UART_NUM_2));
 	ESP_LOGI(DMX_UART_TAG, "Create dmx uart task");
 	xTaskCreate(dmx_uart_task, "dmx_uart_task", 4096, NULL, 1, NULL);
-
 	ESP_LOGI(SLAVE_DO_TAG, "Create slave do task");		
 	xTaskCreatePinnedToCore(slave_gpio_do_task, "slave_gpio_do_task", 4096, NULL, 5, NULL, 1);
-	
-//	ESP_LOGI(AMR_STATE_TAG, "Create amr state task");
-//	xTaskCreate(amr_state_machine, "amr_state_machine", 4096, NULL, 7, NULL);
-
-//	ESP_LOGI(FUNCTIONAL_TAG, "Create check functional input task");
-//	xTaskCreate(check_functional_inputs, "check_functional_inputs", 4096, NULL, 5, NULL);
-	
 	vTaskDelay(pdMS_TO_TICKS(2000)); // this delay is neccessary to let Master start sending PulseA/B before check estop routine
-//	ESP_LOGI(ESTOP_PCNT_TAG, "Create check estop task");
-//	xTaskCreate(check_estop, "check_estop", 4096, NULL, 9, NULL);
+	ESP_LOGI(ESTOP_PCNT_TAG, "Create check estop task");
+	xTaskCreate(check_estop, "check_estop", 4096, NULL, 9, NULL);
 
 	ESP_LOGI(NC_TWAI_TAG, "Create nc twai task");
 	xTaskCreate(nc_twai_task, "nc_twai_task", 4096, NULL, 1, NULL);
